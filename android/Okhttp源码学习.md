@@ -305,3 +305,82 @@ Interceptor是接口,以一个它具体实现类BridgeInterceptor为例。interc
 - 对响应进行gzip，header，cookie处理
 
 
+## ConnectInterceptor ##
+连接拦截器
+
+    @Override public Response intercept(Chain chain) throws IOException {
+    RealInterceptorChain realChain = (RealInterceptorChain) chain;
+    Request request = realChain.request();
+    StreamAllocation streamAllocation = realChain.streamAllocation();
+    
+    // We need the network to satisfy this request. Possibly for validating a conditional GET.
+    boolean doExtensiveHealthChecks = !request.method().equals("GET");
+    HttpCodec httpCodec = streamAllocation.newStream(client, doExtensiveHealthChecks);
+    RealConnection connection = streamAllocation.connection();
+    
+    return realChain.proceed(request, streamAllocation, httpCodec, connection);
+      }
+
+里面代码少，但逻辑较为复杂。主要是获取第一个拦截器（RetryAndFollowUpInterceptor）创建的StreamAllocation对象，然后调用它的newStream方法，里面进行创建连接等操作，然后获取连接对象（RealConnection）传递到下个拦截器。
+其中主要方法`streamAllocation.newStream(client, doExtensiveHealthChecks);`主要涉及的类有，StreamAllocation（allocation：分配）、ConnectionPool、RealConnection
+
+1.`streamAllocation.newStream(client, doExtensiveHealthChecks);`方法返回一个HttpCodec，http编解码器，主要是RealConnection中newCodec方法获取，返回Http1Codec或者Http2Codec
+
+里面重要逻辑调用获取健康的连接方法`RealConnection resultConnection = findHealthyConnection(connectTimeout, readTimeout,
+  writeTimeout, connectionRetryEnabled, doExtensiveHealthChecks);`
+而findHealthyConnection方法主要是调用findConnection方法。
+
+2.findConnection方法
+  该方法里面逻辑较为复杂，梳理为：当前是否有连接（this.connection对象），有返回，没有则查看连接池（this.connectionPool）是否有连接（`Internal.instance.get(connectionPool, address, this);`里面从连接池中根据address获取），有返回，没有创建一个连接（`result = new RealConnection(connectionPool, selectedRoute);`对象），让其与当前连接关联（调用acquire方法），再添加改连接进连接池等操作
+
+  而真正的连接方法是调用RealConnection对象的connect方法
+	
+	 // Do TCP + TLS handshakes. This is a blocking operation.
+    result.connect(connectTimeout, readTimeout, writeTimeout, connectionRetryEnabled);
+    routeDatabase().connected(result.route());`
+	
+	
+3.RealConnection的connect方法
+省略部分代码，核心代码是
+
+		...
+		if (route.requiresTunnel()) {
+          connectTunnel(connectTimeout, readTimeout, writeTimeout);
+        } else {
+          connectSocket(connectTimeout, readTimeout);
+        }
+		...
+
+如果是https则调用connectTunnel连接通道方法，不是则连接socket
+
+3.1 connectSocket方法
+	
+	private void connectSocket(int connectTimeout, int readTimeout) throws IOException {
+    Proxy proxy = route.proxy();
+    Address address = route.address();
+
+    rawSocket = proxy.type() == Proxy.Type.DIRECT || proxy.type() == Proxy.Type.HTTP
+        ? address.socketFactory().createSocket()
+        : new Socket(proxy);
+
+    rawSocket.setSoTimeout(readTimeout);
+    try {
+      Platform.get().connectSocket(rawSocket, route.socketAddress(), connectTimeout);
+    } catch (ConnectException e) {
+      ConnectException ce = new ConnectException("Failed to connect to " + route.socketAddress());
+      ce.initCause(e);
+      throw ce;
+    }
+    source = Okio.buffer(Okio.source(rawSocket));
+    sink = Okio.buffer(Okio.sink(rawSocket));
+  	}
+
+	里面获取socket对象用OkIo保存输入输出流
+3.2 connectTunnel方法
+里面也嗲用connectSocket方法，但多了创建隧道方法（`createTunnel(readTimeout, writeTimeout, tunnelRequest, url);`）
+
+（todo 理解隧道）
+
+回到拦截器中`streamAllocation.connection();`就是返回上面提到的RealConnection
+
+
