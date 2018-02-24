@@ -383,4 +383,168 @@ Interceptor是接口,以一个它具体实现类BridgeInterceptor为例。interc
 
 回到拦截器中`streamAllocation.connection();`就是返回上面提到的RealConnection
 
+## 补充知识点Okio ##
+![Okio](http://img.blog.csdn.net/20160115144102367)
 
+- Okio 中有两个关键的接口，一个是Sink（可认为是OutputStream的升级版），一个是Source（可认为是InputStream的升级版）
+
+![Okio子类](http://img.blog.csdn.net/20160115144113403)
+
+- Okio子类介绍。BufferedXXX为带有缓冲区功能的子类，而其真正实现类为RealBufferedXXX；GzipXXX是支持gzip功能的实现类
+
+
+## CallServerInterceptor ##
+
+请求服务拦截器,在自定义网络拦截器之后执行,是最里面的一个拦截器。这个拦截器主要进行数据读写操作。
+
+里面主要进行如下操作
+
+1. 获取之间之前创建的HttpCodec，StreamAllocation，request等信息。
+
+	RealInterceptorChain realChain = (RealInterceptorChain) chain;
+    HttpCodec httpCodec = realChain.httpStream();
+    StreamAllocation streamAllocation = realChain.streamAllocation();
+    RealConnection connection = (RealConnection) realChain.connection();
+    Request request = realChain.request();
+
+2. 写入请求头信息（sink流中）
+
+	realChain.eventListener().requestHeadersStart(realChain.call());
+    httpCodec.writeRequestHeaders(request);
+    realChain.eventListener().requestHeadersEnd(realChain.call(), request);
+
+httpCodec有两个实现类一个是Http1Codec,另外一个是Http2Codec，下面贴出Http1Codec具体写入请求头
+
+	@Override public void writeRequestHeaders(Request request) throws IOException {
+    String requestLine = RequestLine.get(
+        request, streamAllocation.connection().route().proxy().type());
+    writeRequest(request.headers(), requestLine);
+  	}
+
+
+	/** Returns bytes of a request header for sending on an HTTP transport. */
+    public void writeRequest(Headers headers, String requestLine) throws IOException {
+    if (state != STATE_IDLE) throw new IllegalStateException("state: " + state);
+    sink.writeUtf8(requestLine).writeUtf8("\r\n");
+    for (int i = 0, size = headers.size(); i < size; i++) {
+      sink.writeUtf8(headers.name(i))
+          .writeUtf8(": ")
+          .writeUtf8(headers.value(i))
+          .writeUtf8("\r\n");
+    }
+    sink.writeUtf8("\r\n");
+    state = STATE_OPEN_REQUEST_BODY;
+  }
+
+3. 判断是否有请求体，有则执行如下逻辑
+   
+   `if (HttpMethod.permitsRequestBody(request.method()) && request.body() != null)`
+
+如果请求头包含100-continue（[http://www.ituring.com.cn/article/130844](http://www.ituring.com.cn/article/130844 "100-continue")），询问服务器是否接受这个请求（服务器接受回应100 continue 拒绝回应 417 expectation failed ）
+
+	if ("100-continue".equalsIgnoreCase(request.header("Expect"))) {
+        httpCodec.flushRequest();
+        realChain.eventListener().responseHeadersStart(realChain.call());
+        responseBuilder = httpCodec.readResponseHeaders(true);
+      }
+
+当服务器100-continue响应成功或者不需要等待响应时（客户端不能无限期等待响应）写入请求体
+
+	 if (responseBuilder == null) {
+        // Write the request body if the "Expect: 100-continue" expectation was met.
+        realChain.eventListener().requestBodyStart(realChain.call());
+        long contentLength = request.body().contentLength();
+        CountingSink requestBodyOut =
+            new CountingSink(httpCodec.createRequestBody(request, contentLength));
+        BufferedSink bufferedRequestBody = Okio.buffer(requestBodyOut);
+
+        request.body().writeTo(bufferedRequestBody);
+        bufferedRequestBody.close();
+        realChain.eventListener()
+            .requestBodyEnd(realChain.call(), requestBodyOut.successfulCount);
+      } else if (!connection.isMultiplexed()) {
+        // If the "Expect: 100-continue" expectation wasn't met, prevent the HTTP/1 connection
+        // from being reused. Otherwise we're still obligated to transmit the request body to
+        // leave the connection in a consistent state.
+        streamAllocation.noNewStreams();
+      }
+	
+（todo 理解什么是多路复用）
+
+4. 结束请求
+
+	` httpCodec.finishRequest();`
+    
+ 内部调用
+
+	@Override public void finishRequest() throws IOException {
+    sink.flush();
+  	}
+
+5. 读取响应头信息
+
+	if (responseBuilder == null) {
+      realChain.eventListener().responseHeadersStart(realChain.call());
+      responseBuilder = httpCodec.readResponseHeaders(false);
+    }
+
+内部调用readHeaders()
+
+	/** Reads headers or trailers. */
+  	public Headers readHeaders() throws IOException {
+    Headers.Builder headers = new Headers.Builder();
+    // parse the result headers until the first blank line
+    for (String line; (line = source.readUtf8LineStrict()).length() != 0; ) {
+      Internal.instance.addLenient(headers, line);
+    }
+    return headers.build();
+  }
+		
+
+
+6. 构建响应
+
+写入请求，握手情况，请求时间，以及收到响应时间
+
+	Response response = responseBuilder
+        .request(request)
+        .handshake(streamAllocation.connection().handshake())
+        .sentRequestAtMillis(sentRequestMillis)
+        .receivedResponseAtMillis(System.currentTimeMillis())
+        .build();
+
+7. 是否是webSock
+
+	
+根据状态码不同写入不同body
+
+
+	if (forWebSocket && code == 101) {
+      // Connection is upgrading, but we need to ensure interceptors see a non-null response body.
+      response = response.newBuilder()
+          .body(Util.EMPTY_RESPONSE)
+          .build();
+    } else {
+      response = response.newBuilder()
+          .body(httpCodec.openResponseBody(response))
+          .build();
+    }
+
+8. 进行断开操作
+
+coloe
+
+	if ("close".equalsIgnoreCase(response.request().header("Connection"))
+        || "close".equalsIgnoreCase(response.header("Connection"))) {
+      streamAllocation.noNewStreams();
+    }
+
+
+9. 对204，205进行处理
+
+抛出异常
+
+	if ((code == 204 || code == 205) && response.body().contentLength() > 0) {
+      throw new ProtocolException(
+          "HTTP " + code + " had non-zero Content-Length: " + response.body().contentLength());
+    }
