@@ -77,3 +77,23 @@
 ![](http://images2015.cnblogs.com/blog/617148/201606/617148-20160612233430777-736506858.jpg)
 
 虚线三角
+
+
+
+# 类图符号 #
+
+## 类 ##
+
+长方形，由3部分组成，第一部分类名、第二部分属性、第三部分方法。
+
+   ![类](http://www.uml.org.cn/oobject/images/image001.gif)
+
+## 包 ##
+
+![包](http://www.uml.org.cn/oobject/images/image002.gif)
+
+## 接口 ##
+
+通常使用带有名称的小圆圈表示
+
+![接口](http://www.uml.org.cn/oobject/images/image003.gif)
