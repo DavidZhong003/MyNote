@@ -112,3 +112,63 @@ HashMap中实际存储元素内部类为Node节点，与LinkedList中的节点�
 
 - hash 方法计算hash值
 
+	
+		static final int hash(Object key) {
+        	int h;
+        	return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
+    	}
+	判断key是否为空,空的hash值为0,不为空为原hash值的高位+(高位异或地位)
+
+- putVal存放元素
+
+		final V putVal(int hash, K key, V value, boolean onlyIfAbsent,
+                   boolean evict) {
+        Node<K,V>[] tab; Node<K,V> p; int n, i;
+        if ((tab = table) == null || (n = tab.length) == 0)
+            n = (tab = resize()).length;
+        if ((p = tab[i = (n - 1) & hash]) == null)
+            tab[i] = newNode(hash, key, value, null);
+        else {
+            Node<K,V> e; K k;
+            if (p.hash == hash &&
+                ((k = p.key) == key || (key != null && key.equals(k))))
+                e = p;
+            else if (p instanceof TreeNode)
+                e = ((TreeNode<K,V>)p).putTreeVal(this, tab, hash, key, value);
+            else {
+                for (int binCount = 0; ; ++binCount) {
+                    if ((e = p.next) == null) {
+                        p.next = newNode(hash, key, value, null);
+                        if (binCount >= TREEIFY_THRESHOLD - 1) // -1 for 1st
+                            treeifyBin(tab, hash);
+                        break;
+                    }
+                    if (e.hash == hash &&
+                        ((k = e.key) == key || (key != null && key.equals(k))))
+                        break;
+                    p = e;
+                }
+            }
+            if (e != null) { // existing mapping for key
+                V oldValue = e.value;
+                if (!onlyIfAbsent || oldValue == null)
+                    e.value = value;
+                afterNodeAccess(e);
+                return oldValue;
+            }
+        }
+        ++modCount;
+        if (++size > threshold)
+            resize();
+        afterNodeInsertion(evict);
+        return null;
+    }
+
+
+这段代码有点长我们分开分析。
+首先有几个局部变量赋值的动作，tab 为成员变量table（节点数组），n为table的长度，p为数组中某个位置（传入hash值计算后）的Node。
+
+1. 当原来数组为空时候进行resize 调整大小。
+
+resize里面代码比较多，主要逻辑分原数组（table）空和不为空时候的情况。当为空时候，初始化大小为16的数组。而初始阀值（threshold）为初始容量乘以载荷因子（12）。而原数组不为空，newCap为原来的两倍。
+
